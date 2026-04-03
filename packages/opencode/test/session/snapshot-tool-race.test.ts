@@ -39,6 +39,7 @@ import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
 import { Provider as ProviderSvc } from "../../src/provider/provider"
 import { SessionCompaction } from "../../src/session/compaction"
+import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionStatus } from "../../src/session/status"
 import { Shell } from "../../src/shell/shell"
@@ -113,7 +114,7 @@ function makeHttp() {
     LLM.defaultLayer,
     AgentSvc.defaultLayer,
     Command.defaultLayer,
-    Permission.layer,
+    Permission.defaultLayer,
     Plugin.defaultLayer,
     Config.defaultLayer,
     ProviderSvc.defaultLayer,
@@ -134,6 +135,7 @@ function makeHttp() {
       Layer.provideMerge(proc),
       Layer.provideMerge(registry),
       Layer.provideMerge(trunc),
+      Layer.provide(Instruction.defaultLayer),
       Layer.provideMerge(deps),
     ),
   )
