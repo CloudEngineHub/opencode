@@ -32,7 +32,7 @@ import { CommentsProvider } from "@/context/comments"
 import { FileProvider } from "@/context/file"
 import { ServerSDKProvider, useServerSDK } from "@/context/server-sdk"
 import { ServerSyncProvider, useServerSync } from "@/context/server-sync"
-import { GlobalProvider } from "@/context/global"
+import { GlobalProvider, useGlobal } from "@/context/global"
 import { HighlightsProvider } from "@/context/highlights"
 import { LanguageProvider, type Locale, useLanguage } from "@/context/language"
 import { LayoutProvider } from "@/context/layout"
@@ -51,7 +51,14 @@ import LegacyLayout from "@/pages/layout"
 import NewLayout from "@/pages/layout-new"
 import { ErrorPage } from "./pages/error"
 import { useCheckServerHealth } from "./utils/server-health"
-import { legacySessionHref, requireServerKey, sessionHref } from "./utils/session-route"
+import {
+  legacySessionHref,
+  legacySessionServer,
+  requireServerKey,
+  selectSessionLineage,
+  sessionHref,
+} from "./utils/session-route"
+import { isSessionNotFoundError } from "./utils/server-errors"
 
 import Session from "@/pages/session"
 import { NewHome, LegacyHome } from "@/pages/home"
@@ -67,7 +74,15 @@ const SessionRoute = () => {
   const tabs = useTabs()
 
   if (params.id && settings.general.newLayoutDesigns()) {
-    return <Navigate href={sessionHref(server.key, params.id)} />
+    const sessionID = params.id
+    return (
+      <Show when={tabs.ready()}>
+        {(_) => {
+          const persisted = tabs.store.filter((item) => item.type === "session")
+          return <Navigate href={sessionHref(legacySessionServer(persisted, sessionID, server.key), sessionID)} />
+        }}
+      </Show>
+    )
   }
 
   // When the new layout is enabled, the legacy new-session route (/:dir/session with no id)
@@ -88,14 +103,14 @@ const SessionRoute = () => {
 
 const TargetSessionRoute = () => {
   const params = useParams<{ serverKey: string; id: string }>()
-  const server = useServer()
+  const global = useGlobal()
   const conn = createMemo(() => {
     const key = requireServerKey(params.serverKey)
-    return server.list.find((item) => ServerConnection.key(item) === key)
+    return global.servers.list().find((item) => ServerConnection.key(item) === key)
   })
 
   return (
-    <Show when={`${params.serverKey}\0${params.id}`} keyed>
+    <Show when={requireServerKey(params.serverKey)} keyed>
       <ServerSDKProvider server={conn}>
         <ServerSyncProvider server={conn}>
           <ResolvedTargetSessionRoute />
@@ -115,11 +130,15 @@ function ResolvedTargetSessionRoute() {
   const [resolved] = createResource(
     () => {
       if (cached()) return
-      return { id: params.id, sync: sync() }
+      return { id: params.id, server: serverKey(), sync: sync() }
     },
-    ({ id, sync }) => sync.session.lineage.resolve(id),
+    ({ id, server, sync }) =>
+      sync.session.lineage.resolve(id).catch((error) => {
+        if (isSessionNotFoundError(error, id)) tabs.removeSessionTab({ server, sessionId: id })
+        throw error
+      }),
   )
-  const current = createMemo(() => cached() ?? resolved())
+  const current = createMemo(() => selectSessionLineage(params.id, cached(), resolved()))
   const directory = createMemo(() => current()?.session.directory)
   const targetDirectory = () => directory()!
 
@@ -134,7 +153,7 @@ function ResolvedTargetSessionRoute() {
 
   return (
     <TargetServerScopedProviders directory={directory} sessionID={() => params.id}>
-      <Show when={!resolved.error} fallback={<ErrorPage error={resolved.error} />}>
+      <Show when={!!current() || resolved.state !== "errored"} fallback={<ErrorPage error={resolved.error} />}>
         <Show when={directory()}>
           <Show
             when={settings.general.newLayoutDesigns()}
@@ -202,25 +221,27 @@ function DraftRoute() {
 }
 
 function ResolvedDraftRoute(props: { draft: DraftTab }) {
-  const server = useServer()
-  const conn = createMemo(() => server.list.find((item) => ServerConnection.key(item) === props.draft.server))
+  const global = useGlobal()
+  const conn = createMemo(() => global.servers.list().find((item) => ServerConnection.key(item) === props.draft.server))
   const directory = () => props.draft.directory
   const serverKey = () => props.draft.server
 
   return (
-    <ServerSDKProvider server={conn}>
-      <ServerSyncProvider server={conn}>
-        <TargetServerScopedProviders directory={directory}>
-          <SDKProvider directory={directory}>
-            <DirectoryDataProvider directory={directory} server={serverKey}>
-              <DraftProviders>
-                <NewSession />
-              </DraftProviders>
-            </DirectoryDataProvider>
-          </SDKProvider>
-        </TargetServerScopedProviders>
-      </ServerSyncProvider>
-    </ServerSDKProvider>
+    <Show when={`${props.draft.server}\0${props.draft.directory}`} keyed>
+      <ServerSDKProvider server={conn}>
+        <ServerSyncProvider server={conn}>
+          <TargetServerScopedProviders directory={directory}>
+            <SDKProvider directory={directory}>
+              <DirectoryDataProvider directory={directory} server={serverKey}>
+                <DraftProviders>
+                  <NewSession />
+                </DraftProviders>
+              </DirectoryDataProvider>
+            </SDKProvider>
+          </TargetServerScopedProviders>
+        </ServerSyncProvider>
+      </ServerSDKProvider>
+    </Show>
   )
 }
 
@@ -294,7 +315,7 @@ function ServerScopedProviders(props: ServerScopedShellProps) {
     <PermissionProvider directory={props.directory}>
       <LayoutProvider>
         <NotificationProvider directory={props.directory} sessionID={props.sessionID}>
-          <ModelsProvider>{props.children}</ModelsProvider>
+          <ModelsProvider directory={props.directory}>{props.children}</ModelsProvider>
         </NotificationProvider>
       </LayoutProvider>
     </PermissionProvider>
@@ -323,7 +344,7 @@ function TargetServerScopedProviders(props: ServerScopedShellProps) {
   return (
     <PermissionProvider directory={props.directory}>
       <NotificationProvider directory={props.directory} sessionID={props.sessionID}>
-        <ModelsProvider>{props.children}</ModelsProvider>
+        <ModelsProvider directory={props.directory}>{props.children}</ModelsProvider>
       </NotificationProvider>
     </PermissionProvider>
   )
@@ -569,18 +590,31 @@ function Routes() {
       </Route>
       <Show when={settings.general.newLayoutDesigns()}>
         <Route path="/" component={NewHome} />
-        <Route
-          path="/:dir/session/:id"
-          component={() => {
-            const server = useServer()
-            const { id } = useParams()
-
-            return <Navigate href={`/server/${server.key}/session/${id}`} />
-          }}
-        />
+        <Route path="/:dir/session/:id" component={LegacyTargetSessionRoute} />
       </Show>
       <Route path="/new-session" component={DraftRoute} />
       <Route path="/server/:serverKey/session/:id" component={TargetSessionRoute} />
     </>
+  )
+}
+
+function LegacyTargetSessionRoute() {
+  const server = useServer()
+  const tabs = useTabs()
+  const params = useParams<{ id: string }>()
+
+  return (
+    <Show when={tabs.ready()}>
+      <Navigate
+        href={sessionHref(
+          legacySessionServer(
+            tabs.store.filter((item) => item.type === "session"),
+            params.id,
+            server.key,
+          ),
+          params.id,
+        )}
+      />
+    </Show>
   )
 }
