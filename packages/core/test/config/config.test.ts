@@ -709,7 +709,7 @@ describe("Config", () => {
         const project = path.join(tmp.path, "project")
         const remote = (entries: readonly Entry[]) => ({
           provider: Config.latest(entries, "providers")?.remote?.package,
-          policies: Config.latest(entries, "experimental")?.policies,
+          policies: Config.latest(entries, "policies"),
         })
         const loaded = {
           provider: "aisdk:@ai-sdk/openai-compatible",
@@ -966,14 +966,14 @@ describe("Config", () => {
       migrateV1({
         enabled_providers: ["anthropic", "openai"],
         disabled_providers: ["openai"],
-      }).experimental?.policies,
+      }).policies,
     ).toEqual([
       { action: "provider.use", resource: "*", effect: "deny" },
       { action: "provider.use", resource: "anthropic", effect: "allow" },
       { action: "provider.use", resource: "openai", effect: "allow" },
       { action: "provider.use", resource: "openai", effect: "deny" },
     ])
-    expect(migrateV1({ enabled_providers: [] }).experimental?.policies).toEqual([
+    expect(migrateV1({ enabled_providers: [] }).policies).toEqual([
       { action: "provider.use", resource: "*", effect: "deny" },
     ])
   })
@@ -1031,7 +1031,7 @@ describe("Config", () => {
     expect(migrated.model).toEqual({ providerID: "azure", model: "deployment" })
     expect(migrated.agents?.reviewer?.model).toEqual({ providerID: "google-vertex", model: "claude-sonnet" })
     expect(migrated.commands?.review?.model).toEqual({ providerID: "azure", model: "deployment" })
-    expect(migrated.experimental?.policies).toEqual([
+    expect(migrated.policies).toEqual([
       { action: "provider.use", resource: "*", effect: "deny" },
       { action: "provider.use", resource: "google-vertex", effect: "allow" },
       { action: "provider.use", resource: "azure", effect: "deny" },
@@ -1306,7 +1306,7 @@ describe("Config", () => {
                   fs.writeFile(
                     path.join(tmp.path, "opencode.jsonc"),
                     `{
-                      // Ignored reference: {file:missing.txt}
+                      // Ignored reference: {file:.}
                       "username": "user-{env:OPENCODE_TEST_MISSING}",
                       "mcp": {
                         "servers": {
@@ -1315,7 +1315,8 @@ describe("Config", () => {
                             "url": "https://example.com/mcp",
                             "headers": {
                               "Authorization": "Bearer {env:OPENCODE_TEST_MCP_TOKEN}",
-                              "X-Token": "{file:token.txt}"
+                              "X-Token": "{file:token.txt}",
+                              "X-Missing": "Bearer {file:~/.opencode-test-missing/key}"
                             }
                           }
                         }
@@ -1335,6 +1336,7 @@ describe("Config", () => {
                 expect(remote.headers).toEqual({
                   Authorization: "Bearer secret",
                   "X-Token": 'file\n"token"',
+                  "X-Missing": "Bearer ",
                 })
               }).pipe(Effect.provide(testLayer(tmp.path)))
             }),
