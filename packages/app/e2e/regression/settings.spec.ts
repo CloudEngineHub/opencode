@@ -1328,6 +1328,80 @@ test("providers: OpenCode Go connects with its own methods, not the Console sign
   expect(attempts).toEqual([])
 })
 
+test("providers: a rejected API key shows the server error and can be sent again", async ({ page }) => {
+  const keys: unknown[] = []
+
+  const { settings } = await open(page, {
+    integrations: [{ id: "openrouter", name: "OpenRouter", methods: [{ type: "key" }], connections: [] }],
+    onConnectKey: (input) => {
+      keys.push(input.body)
+
+      return { error: "Invalid API key" }
+    },
+  })
+
+  await settings.getByRole("tab", { name: "Providers", exact: true }).click()
+  await settings
+    .locator(".settings-provider-row", { hasText: "OpenRouter" })
+    .getByRole("button", { name: "Connect", exact: true })
+    .click()
+  const dialog = page.getByRole("dialog", { name: "Connect OpenRouter", exact: true })
+  const submit = dialog.getByRole("button", { name: "Continue", exact: true })
+  await dialog.getByPlaceholder("API key").fill("sk-bad")
+  await submit.click()
+
+  await expect(dialog.getByRole("alert")).toHaveText("Invalid API key")
+  await expect(dialog.getByPlaceholder("API key")).toHaveValue("sk-bad")
+  await expect(submit).toBeEnabled()
+  expect(keys).toEqual([expect.objectContaining({ key: "sk-bad" })])
+})
+
+test("providers: Back during a pending API key request does not report the provider as connected", async ({ page }) => {
+  const keys: string[] = []
+
+  const { settings } = await open(page, {
+    integrations: [
+      {
+        id: "openrouter",
+        name: "OpenRouter",
+        methods: [
+          { id: "oauth", type: "oauth", label: "Sign in" },
+          { type: "key", label: "API key" },
+        ],
+        connections: [],
+      },
+    ],
+    onConnectKey: (input) => {
+      keys.push(input.integrationID)
+    },
+  })
+
+  const held = await holdRoute(page, /\/api\/integration\/openrouter\/connect\/key(\?|$)/, { method: "POST" })
+  await settings.getByRole("tab", { name: "Providers", exact: true }).click()
+  await settings
+    .locator(".settings-provider-row", { hasText: "OpenRouter" })
+    .getByRole("button", { name: "Connect", exact: true })
+    .click()
+  const dialog = page.getByRole("dialog", { name: "Connect OpenRouter", exact: true })
+  await dialog.getByRole("button", { name: "API key", exact: true }).click()
+  await dialog.getByPlaceholder("API key").fill("sk-late")
+  await dialog.getByRole("button", { name: "Continue", exact: true }).click()
+  await held.arrived
+  await expect(dialog.getByRole("button", { name: "Continue", exact: true })).toBeDisabled()
+
+  await dialog.getByRole("button", { name: "Navigate back", exact: true }).click()
+  await expect(dialog.getByRole("button", { name: "Sign in", exact: true })).toBeVisible()
+
+  // The server still saves the key, so its late success reloads the catalogs without leaving the method list.
+  const synced = page.waitForResponse(/\/api\/model(\?|$)/)
+  held.release()
+  await synced
+  expect(keys).toEqual(["openrouter"])
+  await expect(page.getByText("OpenRouter connected", { exact: true })).toHaveCount(0)
+  await dialog.getByRole("button", { name: "API key", exact: true }).click()
+  await expect(dialog.getByPlaceholder("API key")).toHaveValue("")
+})
+
 test("providers: the free tier upsell opens Go on its own, sized to its content", async ({ page }) => {
   const view = await openSession(page, { name: "FreeTier", integrations: consoleIntegrations })
   await view.push([
@@ -1503,6 +1577,117 @@ test("providers: adding an account starts a lone method once", async ({ page, co
   expect(attempts).toEqual(["github-copilot"])
 })
 
+test("providers: Back from a pending sign-in cancels it and lets a backdrop click close the list", async ({
+  page,
+  context,
+}) => {
+  await context.route("https://auth.example.test/**", (route) => route.fulfill({ body: "Sign in" }))
+  const cancelled: string[] = []
+
+  const { settings } = await open(page, {
+    integrations: [
+      {
+        id: "github-copilot",
+        name: "GitHub Copilot",
+        methods: [{ id: "device", type: "oauth", label: "GitHub" }],
+        connections: [],
+      },
+    ],
+    onIntegrationOAuth: () => ({ url: "https://auth.example.test/device?user_code=GH12-3456" }),
+    onIntegrationOAuthCancel: (attemptID) => cancelled.push(attemptID),
+  })
+
+  await settings.getByRole("tab", { name: "Providers", exact: true }).click()
+  await settings.getByRole("button", { name: "Show more providers", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  const popup = page.waitForEvent("popup")
+  await dialog.locator('[data-provider-id="github-copilot"]').click()
+  await popup
+  await expect(dialog.getByText("Waiting for authorization…", { exact: true })).toBeVisible()
+
+  await dialog.getByRole("button", { name: "Navigate back", exact: true }).click()
+  await expect(dialog.locator('[data-provider-id="github-copilot"]')).toBeVisible()
+  await expect.poll(() => cancelled).toEqual(["con_mock_1"])
+
+  // The page corner is outside the dialog, so the click lands on the backdrop.
+  await page.mouse.click(8, 8)
+  await expect(dialog).toHaveCount(0)
+})
+
+test("providers: Back from a Claude Agent check started by Add account returns to its accounts", async ({ page }) => {
+  const { settings } = await open(page, {
+    integrations: [
+      {
+        id: "claude-agent",
+        name: "Claude Agent",
+        methods: [{ id: "claude-login", type: "external", label: "Claude Code login (claude auth login)" }],
+        connections: [{ type: "credential", id: "cred_claude", label: "Claude Code", method: "external" }],
+      },
+    ],
+  })
+
+  const held = await holdRoute(page, /\/api\/integration\/claude-agent\/connect\/external(\?|$)/, { method: "POST" })
+  await settings.getByRole("tab", { name: "Providers", exact: true }).click()
+  await settings.getByRole("button", { name: "Show more providers", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  await dialog.locator('[data-provider-id="claude-agent"]').click()
+  await dialog.getByRole("button", { name: "Add account", exact: true }).click()
+  await dialog.getByRole("button", { name: "Check again", exact: true }).click()
+  await held.arrived
+  await expect(dialog.getByText("Checking Claude Code…", { exact: true })).toBeVisible()
+
+  await dialog.getByRole("button", { name: "Navigate back", exact: true }).click()
+  await expect(dialog.getByRole("radio", { name: "Claude Code", exact: true })).toBeVisible()
+  held.release()
+})
+
+test("providers: Back from a Console connection without models returns to its sign-in methods", async ({
+  page,
+  context,
+}) => {
+  await context.route("https://auth.example.test/**", (route) => route.fulfill({ body: "Sign in" }))
+  const state = { authorized: false }
+
+  const { settings } = await open(page, {
+    // The workspace has loaded, but it offers no models.
+    provider: () =>
+      state.authorized
+        ? {
+            all: [
+              { id: "opencode", integrationID: "opencode", name: "Anomaly / OpenCode", models: {} },
+              { id: "console-google", integrationID: "opencode", name: "Anomaly / Google", models: {} },
+            ],
+            connected: ["opencode", "console-google"],
+            default: {},
+          }
+        : NO_PROVIDER,
+    integrations: consoleIntegrations,
+    onIntegrationOAuth: () => ({ url: "https://auth.example.test/device?user_code=ABCD-EFGH" }),
+    onIntegrationOAuthStatus: () => {
+      state.authorized = true
+
+      return "complete"
+    },
+  })
+
+  await settings.getByRole("tab", { name: "Providers", exact: true }).click()
+  await settings
+    .locator(".settings-provider-row", { hasText: "OpenCode Console" })
+    .getByRole("button", { name: "Connect", exact: true })
+    .click()
+  const dialog = page.getByRole("dialog", { name: "Connect OpenCode Console", exact: true })
+  const popup = page.waitForEvent("popup")
+  await dialog.getByRole("button", { name: "OpenCode Console account", exact: true }).click()
+  await popup
+  await expect(page.getByRole("dialog").getByText("OpenCode connected", { exact: true })).toBeVisible()
+
+  await page.getByRole("dialog").getByRole("button", { name: "Navigate back", exact: true }).click()
+  await expect(dialog.locator('[data-action="provider-connect-method"]')).toHaveText([
+    "OpenCode Console account",
+    "API key (service account)",
+  ])
+})
+
 test("providers: the account options rename and remove the active account", async ({ page }) => {
   const account = { type: "credential", id: "cred_work", label: "Work", method: "key" }
   const other = { type: "credential", id: "cred_personal", label: "Personal", method: "key" }
@@ -1567,6 +1752,24 @@ test("providers: the account options rename and remove the active account", asyn
   await settings.getByRole("button", { name: "Shared options", exact: true }).click()
   await page.getByRole("menuitem", { name: "Remove", exact: true }).click()
   await expect.poll(() => removed).toEqual(["cred_work"])
+})
+
+test("providers: a disconnect that finds no stored credentials keeps the provider connected", async ({ page }) => {
+  // No integration lists OpenRouter, so the server's integration lookup reports no credentials to remove.
+  const { settings } = await open(page, {
+    provider: { all: [{ id: "openrouter", name: "OpenRouter", models: {} }], connected: ["openrouter"], default: {} },
+    integrations: [],
+  })
+
+  await settings.getByRole("tab", { name: "Providers", exact: true }).click()
+  const connected = settings.locator('[data-component="connected-providers-section"]')
+  const disconnect = connected.getByRole("button", { name: "Disconnect", exact: true })
+  await expect(connected.getByText("OpenRouter", { exact: true })).toBeVisible()
+
+  await disconnect.click()
+  await expect(page.getByText("No removable credentials found for OpenRouter", { exact: true })).toBeVisible()
+  await expect(connected.getByText("OpenRouter", { exact: true })).toBeVisible()
+  await expect(disconnect).toBeVisible()
 })
 
 test("providers: switching to a Zen API key does not wait for a Console workspace", async ({ page }) => {
@@ -1822,6 +2025,44 @@ test("the add server dialog pairs from a one-time link and explains a spent one"
   )
 })
 
+test("a server check that answers after its dialog closed saves nothing and leaves the next dialog open", async ({
+  page,
+}) => {
+  const late = "http://127.0.0.1:4098"
+  await mockRemoteServer(page, { directory: "/remote/settings-demo" })
+  await mockOpenCodeServer(page, {
+    server: late,
+    directory: "/remote/late",
+    project: project({ id: "proj_late", directory: "/remote/late" }),
+    provider: NO_PROVIDER,
+    sessions: [],
+    pageMessages: () => ({ items: [] }),
+  })
+  const check = await holdRoute(page, /^http:\/\/127\.0\.0\.1:4098\/api\/info/)
+  const { settings } = await open(page)
+  await settings.getByRole("tab", { name: "Servers", exact: true }).click()
+  await settings.getByRole("button", { name: "Add server" }).click()
+  const editor = page.getByRole("dialog", { name: "Add server" })
+  await editor.getByRole("button", { name: "Use password", exact: true }).click()
+  await editor.getByLabel("Server address", { exact: true }).fill(late)
+  await editor.getByRole("button", { name: "Add server", exact: true }).click()
+  await check.arrived
+  await page.keyboard.press("Escape")
+  await expect(editor).toHaveCount(0)
+
+  await settings.getByRole("button", { name: "Add server" }).click()
+  const link = editor.getByLabel("Pairing link", { exact: true })
+  await expect(link).toBeFocused()
+  const answered = page.waitForResponse(/^http:\/\/127\.0\.0\.1:4098\/api\/info/)
+  check.release()
+  await answered
+  // A round trip after the answer: the cancelled check had every chance to save and close by now.
+  await link.fill("still open")
+
+  await expect(link).toHaveValue("still open")
+  await expect(settings.getByText(late, { exact: true })).toHaveCount(0)
+})
+
 test("a pairing code with several addresses keeps the first one that works with its token", async ({ page }) => {
   // Both addresses reach one server. The second spends the code first, so the first answers 401, and the token works on
   // it as on every address of that server.
@@ -1861,7 +2102,7 @@ test("a pairing code with several addresses keeps the first one that works with 
 
 test("the Side tabs interface mode switches to vertical tabs and survives reload", async ({ page }) => {
   const { settings } = await open(page)
-  const layout = settings.getByRole("group", { name: "Interface" })
+  const layout = settings.getByRole("group", { name: "Interface layout", exact: true })
   await expect(layout.getByRole("radio", { name: "Top tabs", exact: true })).toBeChecked()
   await layout.getByText("Side tabs", { exact: true }).click()
   await expect(layout.getByRole("radio", { name: "Side tabs", exact: true })).toBeChecked()
