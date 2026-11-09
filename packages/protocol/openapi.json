@@ -345,16 +345,6 @@
                 }
               }
             }
-          },
-          "503": {
-            "description": "ServiceUnavailableError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
-                }
-              }
-            }
           }
         },
         "description": "Retrieve currently registered agents.",
@@ -9952,16 +9942,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "ServiceUnavailableError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
                 }
               }
             }
@@ -26292,9 +26272,17 @@
             "$ref": "#/components/schemas/Location.Ref"
           },
           "data": {
-            "not": {
-              "type": "null"
-            }
+            "type": "object",
+            "properties": {
+              "integrationID": {
+                "$ref": "#/components/schemas/Integration.ID"
+              },
+              "credentialID": {
+                "$ref": "#/components/schemas/Credential.ID"
+              }
+            },
+            "required": ["integrationID", "credentialID"],
+            "additionalProperties": false
           }
         },
         "required": ["id", "created", "type", "data"],
