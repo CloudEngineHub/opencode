@@ -7,8 +7,7 @@ import { Persist, persisted } from "@/runtime/persistence/storage"
 import { usePlatform } from "@/runtime/platform/platform"
 import { ServerConnection, useServers } from "@/runtime/server/registry"
 import { useGlobal } from "@/runtime/server/runtime"
-import { useCommand } from "@/shell/commands/command"
-import { selectTip, TIP_INTERVAL_MS, type Tip } from "./queue"
+import { FIRST_TIP_DELAY_MS, selectTip, TIP_INTERVAL_MS, type Tip } from "./queue"
 
 const STARTUP_DELAY = 2 * 60 * 1000
 
@@ -17,6 +16,7 @@ const History = Persistence.struct({
   shownAt: Schema.Finite,
   dismissed: Persistence.array(Schema.String),
   dismissedAt: Schema.Finite,
+  firstSeen: Persistence.fallback(Schema.Finite, () => 0),
 })
 
 export function createTipToasts() {
@@ -24,7 +24,6 @@ export function createTipToasts() {
   const servers = useServers()
   const language = useLanguage()
   const platform = usePlatform()
-  const command = useCommand()
 
   const server = createMemo(() => {
     const conn = servers.visible.find(servers.current) ?? servers.visible[0]
@@ -58,14 +57,21 @@ export function createTipToasts() {
           ?.some((item) => item.name === "browse"),
       action: {
         label: "tips.browse.install",
-        run: () => platform.openExternal("https://chromewebstore.google.com/detail/mfnicocicmmlkpjnaffgihfjhdgjkdjg"),
+        run: () => platform.openExternal(
+            "https://chromewebstore.google.com/detail/mfnicocicmmlkpjnaffgihfjhdgjkdjg?utm_source=opencode-desktop&utm_campaign=tip-browse",
+          ),
       },
     },
     {
-      id: "session-search",
-      title: "tips.search.title",
-      description: "tips.search.description",
-      action: { label: "command.session.search", run: () => command.trigger("sessions.search") },
+      id: "hex",
+      title: "tips.hex.title",
+      description: "tips.hex.description",
+      action: {
+        label: "tips.hex.install",
+        // anoma.ly/hex 404s with a query string; the trailing slash is required.
+        run: () =>
+          platform.openExternal("https://anoma.ly/hex/?utm_source=opencode-desktop&utm_campaign=tip-hex"),
+      },
     },
   ]
 
@@ -74,6 +80,11 @@ export function createTipToasts() {
     shownAt: 0,
     dismissed: [],
     dismissedAt: 0,
+    firstSeen: 0,
+  })
+
+  createEffect(() => {
+    if (loaded() && !history.firstSeen) setHistory("firstSeen", Date.now())
   })
 
   const [tick, setTick] = createSignal(0)
@@ -85,6 +96,7 @@ export function createTipToasts() {
 
     const times = [
       Math.max(history.shownAt, history.dismissedAt) + TIP_INTERVAL_MS,
+      history.firstSeen + FIRST_TIP_DELAY_MS,
       ...tips.flatMap((tip) => [tip.start ?? 0, tip.end ?? 0]),
     ]
 
